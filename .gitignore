@@ -12,3 +12,6 @@ wheels/
 # Secrets
 .env
 
+# Local live test scratch file
+live_test.py
+
