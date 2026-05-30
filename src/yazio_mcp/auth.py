@@ -31,6 +31,10 @@ class AuthError(RuntimeError):
     """Raised when authentication or token refresh fails."""
 
 
+class InvalidCredentialsError(AuthError):
+    """Terminal auth failure (wrong username/password) — retrying won't help."""
+
+
 @dataclass
 class Token:
     access_token: str
@@ -98,12 +102,23 @@ class YazioAuth:
         except httpx.HTTPError as exc:  # network-level failure
             raise AuthError(f"Token request failed: {exc}") from exc
 
+        if resp.status_code in (400, 401):
+            # Terminal: wrong credentials / refused grant. Don't bother retrying.
+            raise InvalidCredentialsError(
+                f"Yazio rejected the credentials (HTTP {resp.status_code}): "
+                f"{resp.text[:200]}"
+            )
         if resp.status_code != httpx.codes.OK:
             raise AuthError(
                 f"Yazio auth returned HTTP {resp.status_code}: {resp.text[:200]}"
             )
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise AuthError(
+                f"Yazio auth: expected JSON token, got {resp.text[:120]!r}"
+            ) from exc
         try:
             return Token(
                 access_token=data["access_token"],

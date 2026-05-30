@@ -2,11 +2,22 @@ import httpx
 import pytest
 import respx
 
+from yazio_mcp import client as client_mod
 from yazio_mcp.auth import TOKEN_PATH
 from yazio_mcp.client import API_VERSION, YazioClient, YazioError
 
 BASE = "https://yzapi.yazio.com"
 V = f"{BASE}/{API_VERSION}"
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """Make retry backoff instant so tests don't actually wait."""
+
+    async def _instant(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(client_mod.YazioClient, "_backoff", staticmethod(_instant))
 
 
 def _auth_route():
@@ -45,30 +56,55 @@ async def test_search_products():
 
 
 @respx.mock
-async def test_add_consumed_item_posts_body():
+async def test_add_consumed_item_posts_body_and_confirms():
     _auth_route()
     route = respx.post(f"{V}/user/consumed-items").mock(
         return_value=httpx.Response(201, json={"ok": True})
     )
     async with YazioClient("u", "p") as yazio:
-        await yazio.add_consumed_item(
+        result = await yazio.add_consumed_item(
             product_id="abc", date="2026-05-29", daytime="breakfast", amount=100
         )
     body = route.calls[0].request.read()
     assert b'"daytime":"breakfast"' in body.replace(b" ", b"")
     assert b'"product_id":"abc"' in body.replace(b" ", b"")
+    # deterministic confirmation regardless of response body
+    assert result == {
+        "status": "ok",
+        "action": "add_consumed_item",
+        "product_id": "abc",
+        "date": "2026-05-29",
+        "daytime": "breakfast",
+        "amount": 100,
+    }
 
 
 @respx.mock
-async def test_remove_consumed_item_uses_delete():
+async def test_add_water_intake_empty_body_still_confirms():
+    _auth_route()
+    respx.post(f"{V}/user/water-intake").mock(return_value=httpx.Response(200))
+    async with YazioClient("u", "p") as yazio:
+        result = await yazio.add_water_intake(date="2026-05-29", water_intake_ml=500)
+    # empty 200 body used to return None; now a clear confirmation
+    assert result["status"] == "ok"
+    assert result["water_intake"] == 500
+
+
+@respx.mock
+async def test_remove_consumed_item_uses_delete_and_confirms():
     _auth_route()
     route = respx.delete(f"{V}/user/consumed-items").mock(
         return_value=httpx.Response(200)
     )
     async with YazioClient("u", "p") as yazio:
-        await yazio.remove_consumed_item("item-123")
+        result = await yazio.remove_consumed_item("item-123")
     assert route.calls[0].request.method == "DELETE"
     assert b"item-123" in route.calls[0].request.read()
+    assert result == {
+        "status": "ok",
+        "action": "remove_consumed_item",
+        "id": "item-123",
+    }
 
 
 @respx.mock
@@ -86,3 +122,103 @@ async def test_missing_date_raises():
     async with YazioClient("u", "p") as yazio:
         with pytest.raises(ValueError):
             await yazio.daily_summary(None)  # type: ignore[arg-type]
+
+
+# -- optimizations -----------------------------------------------------------
+
+
+@respx.mock
+async def test_single_login_across_many_calls():
+    """The whole point of the long-lived client: log in once, not per call."""
+    auth = _auth_route()
+    respx.get(f"{V}/user/goals").mock(return_value=httpx.Response(200, json={}))
+    respx.get(f"{V}/user/water-intake").mock(return_value=httpx.Response(200, json={}))
+    async with YazioClient("u", "p") as yazio:
+        await yazio.goals("2026-05-29")
+        await yazio.water_intake("2026-05-29")
+        await yazio.goals("2026-05-28")
+    assert auth.call_count == 1  # not 3
+
+
+@respx.mock
+async def test_nutrients_range_single_request():
+    _auth_route()
+    route = respx.get(f"{V}/user/consumed-items/nutrients-daily").mock(
+        return_value=httpx.Response(200, json=[{"date": "2026-05-01", "energy": 2000}])
+    )
+    async with YazioClient("u", "p") as yazio:
+        data = await yazio.nutrients_range("2026-05-01", "2026-05-31")
+    assert route.call_count == 1  # 31 days, 1 request
+    assert data[0]["energy"] == 2000
+    params = route.calls[0].request.url.params
+    assert params["start"] == "2026-05-01"
+    assert params["end"] == "2026-05-31"
+
+
+@respx.mock
+async def test_weight_range_fans_out_with_partial_failure():
+    _auth_route()
+    # day 2 fails (500 -> after retries, surfaces as error for that day only)
+    def handler(request):
+        if request.url.params["date"] == "2026-05-02":
+            return httpx.Response(500, text="nope")
+        return httpx.Response(200, json={"value": 80.0})
+
+    respx.get(f"{V}/user/bodyvalues/weight/last").mock(side_effect=handler)
+    async with YazioClient("u", "p") as yazio:
+        result = await yazio.weight_range("2026-05-01", "2026-05-03")
+    ok_dates = {d["date"] for d in result["days"]}
+    err_dates = {e["date"] for e in result["errors"]}
+    assert ok_dates == {"2026-05-01", "2026-05-03"}
+    assert err_dates == {"2026-05-02"}  # one bad day didn't abort the window
+
+
+@respx.mock
+async def test_get_retries_on_5xx_then_succeeds():
+    _auth_route()
+    respx.get(f"{V}/user/goals").mock(
+        side_effect=[
+            httpx.Response(503, text="busy"),
+            httpx.Response(200, json={"energy_goal": 2200}),
+        ]
+    )
+    async with YazioClient("u", "p") as yazio:
+        data = await yazio.goals("2026-05-29")
+    assert data["energy_goal"] == 2200
+
+
+@respx.mock
+async def test_post_not_retried():
+    """Writes must NOT be retried — a retry could double-log."""
+    _auth_route()
+    route = respx.post(f"{V}/user/water-intake").mock(
+        return_value=httpx.Response(503, text="busy")
+    )
+    async with YazioClient("u", "p") as yazio:
+        with pytest.raises(YazioError):
+            await yazio.add_water_intake(date="2026-05-29", water_intake_ml=500)
+    assert route.call_count == 1  # no retry on a non-idempotent write
+
+
+@respx.mock
+async def test_product_is_cached():
+    _auth_route()
+    route = respx.get(f"{V}/products/abc").mock(
+        return_value=httpx.Response(200, json={"name": "Apple"})
+    )
+    async with YazioClient("u", "p") as yazio:
+        first = await yazio.product("abc")
+        second = await yazio.product("abc")
+    assert first == second
+    assert route.call_count == 1  # second call served from cache
+
+
+@respx.mock
+async def test_bad_json_body_raises_yazio_error():
+    _auth_route()
+    respx.get(f"{V}/user/goals").mock(
+        return_value=httpx.Response(200, text="<html>maintenance</html>")
+    )
+    async with YazioClient("u", "p") as yazio:
+        with pytest.raises(YazioError):
+            await yazio.goals("2026-05-29")

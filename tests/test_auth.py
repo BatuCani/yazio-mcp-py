@@ -4,7 +4,11 @@ import httpx
 import pytest
 import respx
 
-from yazio_mcp.auth import TOKEN_PATH, AuthError, YazioAuth
+from yazio_mcp.auth import (
+    TOKEN_PATH,
+    InvalidCredentialsError,
+    YazioAuth,
+)
 
 BASE = "https://yzapi.yazio.com"
 
@@ -68,5 +72,6 @@ async def test_auth_error_on_bad_credentials():
     )
     auth = YazioAuth(username="u", password="bad")
     async with httpx.AsyncClient() as http:
-        with pytest.raises(AuthError):
+        # 400 is a terminal credential error, not a generic/transient one
+        with pytest.raises(InvalidCredentialsError):
             await auth.access_token(http)
