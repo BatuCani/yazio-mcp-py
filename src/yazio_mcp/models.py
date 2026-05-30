@@ -125,15 +125,51 @@ class DailySummary(_Base):
 
 
 class ConsumedItem(_Base):
-    """A single diary entry. Keeps ``id`` — it's the key to delete the entry."""
+    """A diary entry that references a catalog product (by ``product_id``).
+
+    Keeps ``id`` (needed to delete the entry). ``name`` is filled in after the
+    fact by resolving ``product_id`` against the product catalog, so the agent
+    sees WHAT was eaten, not just an opaque id.
+    """
 
     id: str
     date: str | None = None
     daytime: str | None = None
     product_id: str | None = None
+    name: str | None = None
     amount: float | None = None
     serving: str | None = None
     serving_quantity: float | None = None
+
+
+class SimpleProduct(_Base):
+    """A free-text / AI-generated diary entry that carries its own name and
+    nutrients inline (no product_id to resolve). E.g. a photo-logged meal."""
+
+    id: str
+    date: str | None = None
+    daytime: str | None = None
+    name: str | None = None
+    is_ai_generated: bool | None = None
+    energy_kcal: float | None = None
+    protein_g: float | None = None
+    fat_g: float | None = None
+    carb_g: float | None = None
+
+    @classmethod
+    def from_raw(cls, raw: dict[str, Any]) -> SimpleProduct:
+        macros = Macros.model_validate(raw.get("nutrients", {}) or {})
+        return cls(
+            id=raw["id"],
+            date=raw.get("date"),
+            daytime=raw.get("daytime"),
+            name=raw.get("name"),
+            is_ai_generated=raw.get("is_ai_generated"),
+            energy_kcal=_round(macros.energy_kcal),
+            protein_g=_round(macros.protein_g),
+            fat_g=_round(macros.fat_g),
+            carb_g=_round(macros.carb_g),
+        )
 
 
 class WeightEntry(_Base):

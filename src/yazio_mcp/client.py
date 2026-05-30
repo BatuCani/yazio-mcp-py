@@ -28,6 +28,7 @@ from .models import (
     DailySummary,
     Goals,
     ProductDetail,
+    SimpleProduct,
     UserProfile,
     WeightEntry,
 )
@@ -239,14 +240,41 @@ class YazioClient:
         raw = await self._get(f"user/widgets/daily-summary?date={_fmt_date(date)}")
         return DailySummary.from_raw(_fmt_date(date), raw).trimmed()
 
-    async def consumed_items(self, date: str | date_cls) -> dict[str, Any]:
-        """All consumed products for a day, trimmed to the useful fields."""
+    async def consumed_items(
+        self, date: str | date_cls, *, resolve_names: bool = True
+    ) -> dict[str, Any]:
+        """Everything logged for a day, as a single clean item list.
+
+        Yazio splits entries into ``products`` (reference a catalog product by
+        ``product_id``) and ``simple_products`` (free-text / AI-logged meals
+        that carry their own name + nutrients). We merge both into one list.
+
+        When ``resolve_names`` is True, each catalog product's ``name`` is looked
+        up via :meth:`product` (cached) so the agent sees what was eaten, not an
+        opaque id.
+        """
         raw = await self._get(f"user/consumed-items?date={_fmt_date(date)}")
-        items = (raw or {}).get("products", []) + (raw or {}).get("simple_products", [])
+        raw = raw or {}
+
+        items: list[dict[str, Any]] = []
+
+        for p in raw.get("products", []):
+            item = ConsumedItem.model_validate(p)
+            if resolve_names and item.product_id:
+                try:
+                    detail = await self.product(item.product_id)
+                    item.name = detail.get("name")
+                except (YazioError, AuthError):
+                    pass  # name resolution is best-effort; keep the entry
+            items.append(item.trimmed())
+
+        for sp in raw.get("simple_products", []):
+            items.append(SimpleProduct.from_raw(sp).trimmed())
+
         return {
             "date": _fmt_date(date),
-            "items": [ConsumedItem.model_validate(i).trimmed() for i in items],
-            "recipe_portions": (raw or {}).get("recipe_portions", []),
+            "items": items,
+            "recipe_portions": raw.get("recipe_portions", []),
         }
 
     # -- read: ranges (one request for many days) -----------------------------

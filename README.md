@@ -17,6 +17,9 @@ water** from any MCP client (Claude Desktop, Cursor, or your own host).
 > any time Yazio changes their backend. Use it for personal projects, not
 > production.
 
+> 📋 **Continuing on another machine?** See [SETUP.md](SETUP.md) for the full
+> current state, architecture, and a from-zero install/run guide.
+
 ## Why this exists
 
 There's a solid JavaScript MCP (`yazio-mcp`) and a JS client library (`juriadams/yazio`),

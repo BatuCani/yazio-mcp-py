@@ -267,7 +267,7 @@ async def test_user_profile_strips_sensitive_fields():
 
 
 @respx.mock
-async def test_consumed_items_trimmed_to_list():
+async def test_consumed_items_resolves_names_and_simple_products():
     _auth_route()
     respx.get(f"{V}/user/consumed-items").mock(
         return_value=httpx.Response(
@@ -281,14 +281,57 @@ async def test_consumed_items_trimmed_to_list():
                         "amount": 60,
                     }
                 ],
+                "simple_products": [
+                    {
+                        "id": "item-2",
+                        "daytime": "breakfast",
+                        "name": "Lachsbowl",
+                        "is_ai_generated": True,
+                        "nutrients": {"energy.energy": 613, "nutrient.protein": 37},
+                    }
+                ],
+                "recipe_portions": [],
+            },
+        )
+    )
+    # catalog product name resolution
+    respx.get(f"{V}/products/p1").mock(
+        return_value=httpx.Response(200, json={"name": "Hühnerei, gekocht"})
+    )
+    async with YazioClient("u", "p") as yazio:
+        result = await yazio.consumed_items("2026-05-29")
+
+    assert result["date"] == "2026-05-29"
+    assert len(result["items"]) == 2
+
+    catalog = next(i for i in result["items"] if i["id"] == "item-1")
+    assert catalog["name"] == "Hühnerei, gekocht"  # product_id was resolved
+    assert catalog["daytime"] == "lunch"
+
+    simple = next(i for i in result["items"] if i["id"] == "item-2")
+    assert simple["name"] == "Lachsbowl"  # inline name carried through
+    assert simple["energy_kcal"] == 613
+    assert simple["protein_g"] == 37
+    assert simple["is_ai_generated"] is True
+
+
+@respx.mock
+async def test_consumed_items_resolve_names_off():
+    _auth_route()
+    respx.get(f"{V}/user/consumed-items").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "products": [{"id": "i1", "product_id": "p1", "daytime": "lunch"}],
                 "simple_products": [],
                 "recipe_portions": [],
             },
         )
     )
+    product_route = respx.get(f"{V}/products/p1").mock(
+        return_value=httpx.Response(200, json={"name": "X"})
+    )
     async with YazioClient("u", "p") as yazio:
-        result = await yazio.consumed_items("2026-05-29")
-    assert result["date"] == "2026-05-29"
-    assert len(result["items"]) == 1
-    assert result["items"][0]["id"] == "item-1"  # id kept (needed to delete)
-    assert result["items"][0]["daytime"] == "lunch"
+        result = await yazio.consumed_items("2026-05-29", resolve_names=False)
+    assert "name" not in result["items"][0]  # no resolution requested
+    assert product_route.call_count == 0  # and no extra product call made
