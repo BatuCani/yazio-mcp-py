@@ -18,11 +18,19 @@ import random
 import time
 from datetime import date as date_cls
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from .auth import DEFAULT_BASE_URL, AuthError, YazioAuth
+from .models import (
+    ConsumedItem,
+    DailySummary,
+    Goals,
+    ProductDetail,
+    UserProfile,
+    WeightEntry,
+)
 
 API_VERSION = "v10"
 
@@ -214,23 +222,32 @@ class YazioClient:
 
     # -- read: profile & goals ------------------------------------------------
 
-    async def user(self) -> Any:
-        """Full user profile (name, premium status, units, goals)."""
-        return await self._get("user")
+    async def user(self) -> dict[str, Any]:
+        """User profile, trimmed — sensitive fields (token, email, uuid) removed."""
+        raw = await self._get("user")
+        return UserProfile.model_validate(raw).trimmed()
 
-    async def goals(self, date: str | date_cls) -> Any:
+    async def goals(self, date: str | date_cls) -> dict[str, Any]:
         """Nutrition goals (energy + macro targets) for a given day."""
-        return await self._get(f"user/goals?date={_fmt_date(date)}")
+        raw = await self._get(f"user/goals?date={_fmt_date(date)}")
+        return Goals.model_validate(raw).trimmed()
 
     # -- read: daily nutrition ------------------------------------------------
 
-    async def daily_summary(self, date: str | date_cls) -> Any:
-        """Widget-style daily summary: meals, activity, steps, water, goals."""
-        return await self._get(f"user/widgets/daily-summary?date={_fmt_date(date)}")
+    async def daily_summary(self, date: str | date_cls) -> dict[str, Any]:
+        """Daily summary, flattened to totals + per-meal macros + goals."""
+        raw = await self._get(f"user/widgets/daily-summary?date={_fmt_date(date)}")
+        return DailySummary.from_raw(_fmt_date(date), raw).trimmed()
 
-    async def consumed_items(self, date: str | date_cls) -> Any:
-        """All consumed products, recipes and simple products for a day."""
-        return await self._get(f"user/consumed-items?date={_fmt_date(date)}")
+    async def consumed_items(self, date: str | date_cls) -> dict[str, Any]:
+        """All consumed products for a day, trimmed to the useful fields."""
+        raw = await self._get(f"user/consumed-items?date={_fmt_date(date)}")
+        items = (raw or {}).get("products", []) + (raw or {}).get("simple_products", [])
+        return {
+            "date": _fmt_date(date),
+            "items": [ConsumedItem.model_validate(i).trimmed() for i in items],
+            "recipe_portions": (raw or {}).get("recipe_portions", []),
+        }
 
     # -- read: ranges (one request for many days) -----------------------------
 
@@ -249,9 +266,10 @@ class YazioClient:
 
     # -- read: body, water, exercise ------------------------------------------
 
-    async def weight(self, date: str | date_cls) -> Any:
+    async def weight(self, date: str | date_cls) -> dict[str, Any]:
         """Most recent weight entry on or before the given date."""
-        return await self._get(f"user/bodyvalues/weight/last?date={_fmt_date(date)}")
+        raw = await self._get(f"user/bodyvalues/weight/last?date={_fmt_date(date)}")
+        return WeightEntry.model_validate(raw).trimmed()
 
     async def water_intake(self, date: str | date_cls) -> Any:
         """Water intake (ml) for a day."""
@@ -320,13 +338,14 @@ class YazioClient:
         self._cache_put(key, result, _SEARCH_TTL)
         return result
 
-    async def product(self, product_id: str) -> Any:
+    async def product(self, product_id: str) -> dict[str, Any]:
         """Detailed nutrition info for a single product (long-TTL cached)."""
         key = f"product:{product_id}"
         cached = self._cache_get(key)
         if cached is not None:
-            return cached
-        result = await self._get(f"products/{product_id}")
+            return cast("dict[str, Any]", cached)
+        raw = await self._get(f"products/{product_id}")
+        result = ProductDetail.model_validate(raw).trimmed()
         self._cache_put(key, result, _PRODUCT_TTL)
         return result
 

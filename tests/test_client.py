@@ -30,17 +30,33 @@ def _auth_route():
 
 
 @respx.mock
-async def test_daily_summary_sends_bearer_and_date():
+async def test_daily_summary_sends_bearer_and_flattens():
     _auth_route()
+    raw = {
+        "steps": 1234,
+        "water_intake": 500,
+        "goals": {"energy.energy": 2200},
+        "meals": {
+            "breakfast": {"nutrients": {"energy.energy": 300, "nutrient.protein": 20}},
+            "lunch": {"nutrients": {"energy.energy": 0}},
+        },
+    }
     route = respx.get(f"{V}/user/widgets/daily-summary").mock(
-        return_value=httpx.Response(200, json={"steps": 1234})
+        return_value=httpx.Response(200, json=raw)
     )
     async with YazioClient("u", "p") as yazio:
         data = await yazio.daily_summary("2026-05-29")
-    assert data == {"steps": 1234}
     req = route.calls[0].request
     assert req.headers["Authorization"] == "Bearer tok"
     assert req.url.params["date"] == "2026-05-29"
+    # flattened + summed
+    assert data["date"] == "2026-05-29"
+    assert data["total_kcal"] == 300
+    assert data["steps"] == 1234
+    assert data["water_ml"] == 500
+    assert data["goals"]["energy_kcal"] == 2200
+    breakfast = next(m for m in data["meals"] if m["name"] == "breakfast")
+    assert breakfast["protein_g"] == 20
 
 
 @respx.mock
@@ -179,12 +195,12 @@ async def test_get_retries_on_5xx_then_succeeds():
     respx.get(f"{V}/user/goals").mock(
         side_effect=[
             httpx.Response(503, text="busy"),
-            httpx.Response(200, json={"energy_goal": 2200}),
+            httpx.Response(200, json={"energy.energy": 2200}),
         ]
     )
     async with YazioClient("u", "p") as yazio:
         data = await yazio.goals("2026-05-29")
-    assert data["energy_goal"] == 2200
+    assert data["energy_kcal"] == 2200
 
 
 @respx.mock
@@ -222,3 +238,57 @@ async def test_bad_json_body_raises_yazio_error():
     async with YazioClient("u", "p") as yazio:
         with pytest.raises(YazioError):
             await yazio.goals("2026-05-29")
+
+
+@respx.mock
+async def test_user_profile_strips_sensitive_fields():
+    _auth_route()
+    respx.get(f"{V}/user").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "first_name": "Batu",
+                "is_premium": False,
+                "user_token": "SECRET-TOKEN",
+                "email": "batu@example.com",
+                "uuid": "abc-123",
+                "stripe_customer_id": "cus_x",
+            },
+        )
+    )
+    async with YazioClient("u", "p") as yazio:
+        profile = await yazio.user()
+    assert profile["first_name"] == "Batu"
+    # sensitive fields must NOT survive
+    assert "user_token" not in profile
+    assert "email" not in profile
+    assert "uuid" not in profile
+    assert "stripe_customer_id" not in profile
+
+
+@respx.mock
+async def test_consumed_items_trimmed_to_list():
+    _auth_route()
+    respx.get(f"{V}/user/consumed-items").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "products": [
+                    {
+                        "id": "item-1",
+                        "daytime": "lunch",
+                        "product_id": "p1",
+                        "amount": 60,
+                    }
+                ],
+                "simple_products": [],
+                "recipe_portions": [],
+            },
+        )
+    )
+    async with YazioClient("u", "p") as yazio:
+        result = await yazio.consumed_items("2026-05-29")
+    assert result["date"] == "2026-05-29"
+    assert len(result["items"]) == 1
+    assert result["items"][0]["id"] == "item-1"  # id kept (needed to delete)
+    assert result["items"][0]["daytime"] == "lunch"
