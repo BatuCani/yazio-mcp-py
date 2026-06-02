@@ -894,7 +894,7 @@ wheels = [
 ]
 
 [[package]]
-name = "yazio-mcp-py"
+name = "yazio-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

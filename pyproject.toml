@@ -1,18 +1,33 @@
 [project]
-name = "yazio-mcp-py"
+name = "yazio-mcp"
 version = "0.1.0"
 description = "A Python MCP server for the (unofficial) Yazio nutrition API — read, write, and search your Yazio data from any MCP client."
 readme = "README.md"
 authors = [
-    { name = "Batuhan Caniberk", email = "batubln@gmail.com" }
+    { name = "Batuhan Caniberk", email = "180430944+BatuCani@users.noreply.github.com" }
 ]
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
+keywords = ["yazio", "mcp", "model-context-protocol", "nutrition", "calorie-tracker", "fastmcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "httpx>=0.28",
     "pydantic>=2.10",
     "mcp[cli]>=1.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/BatuCani/yazio-mcp-py"
+Repository = "https://github.com/BatuCani/yazio-mcp-py"
+Issues = "https://github.com/BatuCani/yazio-mcp-py/issues"
 
 [project.scripts]
 yazio-mcp = "yazio_mcp.server:main"
